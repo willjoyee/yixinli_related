@@ -13,4 +13,4 @@ results.py- use face++ api to get the results of roll angel, expression (happy,a
 
 # Data
 
-I didn' t make the data publicly, if you are interested, emaill me via wjoy4043@gmail.com 
+I didn' t make all data publicly, if you are interested, emaill me via wjoy4043@gmail.com 
