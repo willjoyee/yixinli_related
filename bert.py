@@ -1,268 +1,183 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# @Time : 2024/5/8 13:05
-# @Author : AwetJodie
+import pandas as pd
+import torch
+from sklearn.model_selection import train_test_split
+from transformers import BertTokenizer
+from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
+from imblearn.over_sampling import SMOTE
+from transformers import RobertaTokenizer
+# 定义准备数据集的函数
+def prepare_dataset(encodings, labels_warm, labels_competence):
+    input_ids = encodings['input_ids']
+    attention_mask = encodings['attention_mask']
+    labels_warm = torch.tensor(labels_warm).float()  # 假设评分是浮点数
+    labels_competence = torch.tensor(labels_competence).float()  # 假设评分是浮点数
+    dataset = TensorDataset(input_ids, attention_mask, labels_warm, labels_competence)
+    return dataset
+
+# 读取数据
+# df_warm = pd.read_excel('train_competence_noid_0323.xlsx')
+# df_competence = pd.read_excel('train_warmth_noid_0325.xlsx')
+
+df_competence = pd.read_excel('train_competence_noid_0323.xlsx')
+df_warm = pd.read_excel('train_warmth_noid_0325.xlsx')
+
+
+df = pd.merge(df_warm, df_competence, on='sentence', suffixes=('_warm', '_competence'))
+
+# 划分数据集
+train_data, temp_data = train_test_split(df, test_size=0.2, random_state=42)
+validation_data, test_data = train_test_split(temp_data, test_size=(1/2), random_state=42)
+
+# 初始化tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
+#tokenizer = RobertaTokenizer.from_pretrained('roberta-base')  # 假设模型名称为'roberta-chinese-base'
+# 定义编码句子的函数
+def encode_sentences(sentences):
+    return tokenizer(sentences, padding=True, truncation=True, return_tensors="pt")
+
+# 对训练集、验证集和测试集进行编码
+train_encodings = encode_sentences(train_data['sentence'].tolist())
+validation_encodings = encode_sentences(validation_data['sentence'].tolist())
+test_encodings = encode_sentences(test_data['sentence'].tolist())
+
+
+# 将数据转换为Tensor
+train_labels_warm = train_data['warmth'].values
+train_labels_competence = train_data['competence'].values
+validation_labels_warm = validation_data['warmth'].values
+validation_labels_competence = validation_data['competence'].values
+test_labels_warm = test_data['warmth'].values
+test_labels_competence = test_data['competence'].values
+
+# 创建TensorDataset
+train_dataset = prepare_dataset(train_encodings, train_labels_warm, train_labels_competence)
+validation_dataset = prepare_dataset(validation_encodings, validation_labels_warm, validation_labels_competence)
+test_dataset = prepare_dataset(test_encodings, test_labels_warm, test_labels_competence)
+
+# 创建DataLoader
+batch_size = 8
+train_loader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=batch_size)
+validation_loader = DataLoader(validation_dataset, sampler=SequentialSampler(validation_dataset), batch_size=batch_size)
+test_loader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=batch_size)
 
 
 import torch
-
-print("PyTorch version:", torch.__version__)
-print("CUDA version:", torch.version.cuda)
+import torch.nn as nn
+from transformers import BertModel
+from torch.optim import Adam,AdamW
 import torch.nn.functional as F
-# import pandas as pd
-# import numpy as np
-# from transformers import BertTokenizer
-# from torch import nn
-# from transformers import BertModel
-# from torch.optim import Adam
-# from tqdm import tqdm
-# import sys
+from tqdm import tqdm
+from transformers import RobertaModel
+# from data_loader import train_loader,validation_loader,test_loader
 
-# tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-# class Dataset(torch.utils.data.Dataset):
-#     def __init__(self, df):
-#         # self.labels = [labels[label] for label in df['category']]
-#         self.labels = [float(label) for label in df['warmth']]
-#         self.texts = [text for text in df['sentence']]
+# 定义模型
+import torch.nn as nn
+from transformers import BertModel
 
-#     def __len__(self):
-#         return len(self.labels)
-#     def __getitem__(self, idx):
-#         text = self.texts[idx]
-#         label = self.labels[idx]
-#         # 使用tokenizer对文本进行编码
-#         encoding = tokenizer.encode_plus(text,
-#                                          padding='max_length',
-#                                          max_length=128,
-#                                          truncation=True,
-#                                          return_tensors="pt")
-#         # 将编码结果转换为张量
-#         input_ids = encoding['input_ids'].squeeze(0)
-#         attention_mask = encoding['attention_mask'].squeeze(0)
-#         return input_ids, attention_mask, label
-#         # 这三行是干嘛的？？ 参考poe
+class WarmCompetenceClassifier(nn.Module):
+    def __init__(self, bert_model_name='bert-large-uncased'):
+        super(WarmCompetenceClassifier, self).__init__()
+        self.bert = BertModel.from_pretrained(bert_model_name)
+        self.warm_classifier = nn.Linear(self.bert.config.hidden_size, 6)  # 6个输出对应0-5的评分
+        self.competence_classifier = nn.Linear(self.bert.config.hidden_size, 9)  # 9个输出对应0,1,2,3,4,5,2.5,3.5,4.5的评分
+
+    def forward(self, input_ids, attention_mask):
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        pooled_output = outputs.pooler_output
+        warm_logits = self.warm_classifier(pooled_output)
+        competence_logits = self.competence_classifier(pooled_output)
+        return warm_logits, competence_logits
 
 
-# # construct the bert model
-# class BertClassifier(nn.Module):
-#     def __init__(self, dropout=0.5):
-#         super(BertClassifier, self).__init__()
-#         self.bert = BertModel.from_pretrained('bert-base-chinese')
-#         self.dropout = nn.Dropout(dropout)
-#         # self.linear_professional = nn.Linear(768, 1)  # 用于专业度的线性层
-#         self.linear_warmth = nn.Linear(768, 1)  # 用于温暖程度的线性层
-#         self.relu = nn.ReLU()
+# 初始化模型
+device = torch.device('cpu')
+model = WarmCompetenceClassifier()
+model.to(device)
 
-#     def forward(self, input_ids, attention_mask):
-#         _, pooled_output = self.bert(input_ids=input_ids, attention_mask=attention_mask, return_dict=False)
-#         dropout_output = self.dropout(pooled_output)
-#         # professional_output = self.linear_professional(dropout_output)
-#         warmth_output = self.linear_warmth(dropout_output)
-#         # professional_score = self.relu(professional_output)
-#         warmth_score = self.relu(warmth_output)
-#         # professional_score = F.sigmoid(professional_output)
-#         warmth_score = F.sigmoid(warmth_output)
-#         return warmth_score
+# 定义损失函数
+warm_criterion = nn.CrossEntropyLoss()
+competence_criterion = nn.CrossEntropyLoss()
 
-# # train the bert model
-# def train(model, train_data, val_data, learning_rate, epochs):
-#     # 通过Dataset类获取训练和验证集
-#     train, val = Dataset(train_data), Dataset(val_data)
-#     # DataLoader根据batch_size获取数据，训练时选择打乱样本
-#     train_dataloader = torch.utils.data.DataLoader(train, batch_size=2, shuffle=True)
-#     val_dataloader = torch.utils.data.DataLoader(val, batch_size=2)
-#     # 判断是否使用GPU
-#     # use_cuda = torch.cuda.is_available()
-#     # device = torch.device("cuda" if use_cuda else "cpu")
-#     use_cuda = torch.cuda.is_available()
-#     if not use_cuda:
-#         print("没有可用的GPU，停止运算")
-#         sys.exit()
-#     device = torch.device("cuda" if use_cuda else "cpu")
-#     # 定义损失函数和优化器
-#     # criterion = nn.CrossEntropyLoss()
-#     # optimizer = Adam(model.parameters(), lr=learning_rate)
-#     criterion = nn.BCEWithLogitsLoss()  # 使用BCEWithLogitsLoss作为损失函数
-#     optimizer = Adam(model.parameters(), lr=learning_rate)
+# 定义优化器
+optimizer = AdamW(model.parameters(), lr=4e-5)
+# optimizer = optim.SGD(bert_classifier_model.parameters(), lr=0.01)
 
-#     if use_cuda:
-#         model = model.cuda()
-#         criterion = criterion.cuda()
-#     # 开始进入训练循环
-#     for epoch_num in range(epochs):
-#         # 定义两个变量，用于存储训练集的准确率和损失
-#         total_loss_train = 0
-#         total_acc_train = 0
-
-#         model.train()  # 设置模型为训练模式
-
-#         for input_ids, attention_mask, labels in tqdm(train_dataloader):
-#             input_ids = input_ids.to(device)
-#             attention_mask = attention_mask.to(device)
-#             labels = labels.to(device)
-
-#             optimizer.zero_grad()
-
-#             warmth_score = model(input_ids, attention_mask)
-
-#             # 计算损失
-#             # professional_loss = criterion(professional_score.squeeze(1), labels.float())
-#             warmth_loss = criterion(warmth_score.squeeze(1), labels.float())
-#             # loss = professional_loss + warmth_loss
-#             loss = warmth_loss
-
-#             total_loss_train += loss.item()
-
-#             # 计算准确率
-#             # professional_pred = torch.sigmoid(professional_score) > 0.5
-#             # warmth_pred = torch.sigmoid(warmth_score) > 0.5
-#             # acc = ((professional_pred == labels) & (warmth_pred == labels)).sum().item()
-#             # total_acc_train += acc
-
-#             # loss.backward()
-#             # optimizer.step()
-#             # 模型更新
-#             model.zero_grad()
-#             loss.backward()
-#             optimizer.step()
-#         # ------ 验证模型 -----------
-#         # 定义两个变量，用于存储验证集的准确率和损失
-#         total_acc_val = 0
-#         total_loss_val = 0
-#         model.eval()
-
-#         with torch.no_grad():
-#             for input_ids, attention_mask, labels in val_dataloader:
-#                 input_ids = input_ids.to(device)
-#                 attention_mask = attention_mask.to(device)
-#                 labels = labels.to(device)
-
-#                 warmth_score = model(input_ids, attention_mask)
-
-#                 # professional_loss = criterion(professional_score.squeeze(1), labels.float())
-#                 warmth_loss = criterion(warmth_score.squeeze(1), labels.float())
-#                 # loss = professional_loss + warmth_loss
-#                 loss = warmth_loss
-
-#                 total_loss_val += loss.item()
-
-#                 # professional_pred = torch.sigmoid(professional_score) > 0.5
-#                 # warmth_pred = torch.sigmoid(warmth_score) > 0.5
-#                 # acc = ((professional_pred == labels) & (warmth_pred == labels)).sum().item()
-#                 # total_acc_val += acc
-
-#         # avg_loss_train = total_loss_train / len(train_dataloader)
-#         # avg_loss_val = total_loss_val / len(val_dataloader)
-
-#         print(
-#             f'''Epochs: {epoch_num + 1} 
-#               | Train Loss: {total_loss_train / len(train_data): .3f} 
-#               | Val Loss: {total_loss_val / len(val_data): .3f} ''')
-#               #| Val Accuracy: {total_acc_val / len(val_data): .3f}
-#         #| Train Accuracy: {total_acc_train / len(train_data): .3f}
+# 定义准确度计算函数
+def calculate_accuracy(logits, labels):
+    _, preds = torch.max(logits, dim=1)
+    return torch.tensor(torch.sum(preds == labels).item() / len(preds))
 
 
-#     # evaluate the bert model
-# def evaluate(model, test_data):
-#     test = Dataset(test_data)
-#     test_dataloader = torch.utils.data.DataLoader(test, batch_size=2)
-#     use_cuda = torch.cuda.is_available()
-#     device = torch.device("cuda" if use_cuda else "cpu")
-#     if use_cuda:
-#         model = model.cuda()
-#     criterion = nn.BCEWithLogitsLoss()
-#     total_loss_test = 0
-#     # total_acc_test = 0
-#     # total_samples = 0
-#     with torch.no_grad():
-#         for input_ids, attention_mask, labels in test_dataloader:
-#             input_ids = input_ids.to(device)
-#             attention_mask = attention_mask.to(device)
-#             labels = labels.to(device)
+# 训练和验证模型
+num_epochs = 15
+accuracy_list = []
+for epoch in range(num_epochs):
+    model.train()
+    train_loss = 0.0
+    for batch in tqdm(train_loader, desc='Training'):
+        input_ids, attention_mask, warm_labels, competence_labels = [b.to(device) for b in batch]
 
-#             warmth_score = model(input_ids, attention_mask)
-#             # professional_loss = criterion(professional_score.squeeze(1), labels.float())
-#             warmth_loss = criterion(warmth_score.squeeze(1), labels.float())
-#             # loss = professional_loss + warmth_loss
-#             loss = warmth_loss
-#             total_loss_test += loss.item()
+        optimizer.zero_grad()
 
-#             # professional_pred = torch.sigmoid(professional_score) > 0.5
-#             # warmth_pred = torch.sigmoid(warmth_score) > 0.5
-#             # acc = ((professional_pred == labels) & (warmth_pred == labels)).sum().item()
-#             # total_acc_test += acc
-#             # total_samples += len(labels)
-#     print(f' Test Loss: {total_loss_test / len(test_data): .3f} ')
-#     # print(f'Test Accuracy: {total_acc_test / total_samples:.3f}')
+        warm_logits, competence_logits = model(input_ids, attention_mask)
+        warm_loss = warm_criterion(warm_logits, warm_labels.long())
+        competence_loss = competence_criterion(competence_logits, competence_labels.long())
+        loss = warm_loss + competence_loss  # 总损失是两个损失的和
 
+        loss.backward()
+        optimizer.step()
 
+        train_loss += loss.item()
 
-# # upload the data
-# # bbc_text_df.head()
-# train_text_df = pd.read_csv('D:\WUJia\phd-project\YiXinLi\yixinli_data3\sentence\\train_text_warmth_new0224.csv',encoding='gbk')
-# df = pd.DataFrame(train_text_df)
-# np.random.seed(112)
-# df_train, df_val, df_test = np.split(df.sample(frac=1, random_state=42),
-# [int(.8*len(df)), int(.9*len(df))])
-# print(len(df_train),len(df_val), len(df_test))
+    # 计算平均损失
+    avg_train_loss = train_loss / len(train_loader)
 
+    # 验证模式
+    model.eval()
+    val_warm_accuracy = 0.0
+    val_competence_accuracy = 0.0
+    with torch.no_grad():
+        for batch in tqdm(validation_loader, desc='Validation'):
+            input_ids, attention_mask, warm_labels, competence_labels = [b.to(device) for b in batch]
 
-# # set the parameters of bert
-# EPOCHS = 5
-# model = BertClassifier()
-# LR = 1e-6
-# train(model, df_train, df_val, LR, EPOCHS)
-# evaluate(model, df_test)
+            warm_logits, competence_logits = model(input_ids, attention_mask)
 
-# class pred_Dataset(torch.utils.data.Dataset):
-#     def __init__(self, df2):
-#         self.texts = [text for text in df2['sentence']]
+            val_warm_accuracy += calculate_accuracy(warm_logits, warm_labels.long())
+            val_competence_accuracy += calculate_accuracy(competence_logits, competence_labels.long())
 
-#     def __len__(self):
-#         return len(self.texts)
+    # 计算平均准确率
+    avg_val_warm_accuracy = val_warm_accuracy / len(validation_loader)
+    avg_val_competence_accuracy = val_competence_accuracy / len(validation_loader)
+    accuracy_list.append(avg_val_warm_accuracy)
 
-#     def __getitem__(self, idx):
-#         text = self.texts[idx]
-#         encoding = tokenizer.encode_plus(text, padding='max_length', max_length=512, truncation=True, return_tensors="pt")
-#         input_ids = encoding['input_ids'].squeeze(0)
-#         attention_mask = encoding['attention_mask'].squeeze(0)
-#         return input_ids, attention_mask  # 返回None作为占位符标签
-    
+    print(
+        f'Epoch {epoch + 1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Warm Accuracy: {avg_val_warm_accuracy:.4f}, Val Competence Accuracy: {avg_val_competence_accuracy:.4f}')
+    torch.save(model.state_dict(), f'model_epoch_{epoch+1}.pth')
 
-# def predict(model, data):
-#     dataset = pred_Dataset(data)
-#     dataloader = torch.utils.data.DataLoader(dataset, batch_size=2)
-#     use_cuda = torch.cuda.is_available()
-#     device = torch.device("cuda" if use_cuda else "cpu")
-#     if use_cuda:
-#         model = model.cuda()
-#     warmth_scores = []
-#     with torch.no_grad():
-#         for input_ids, attention_mask, in dataloader:
-#             input_ids = input_ids.to(device)
-#             attention_mask = attention_mask.to(device)
+# # 添加绘图的部分
+# plt.plot(range(1, num_epochs+1), accuracy_list)
+# plt.xlabel('Epoch')
+# plt.ylabel('Accuracy (%)')
+# plt.title('BERT Model Accuracy')
+# plt.show()
 
-#             warmth_score = model(input_ids, attention_mask)
+# 测试模型
+model.eval()
+test_warm_accuracy = 0.0
+test_competence_accuracy = 0.0
+with torch.no_grad():
+    for batch in tqdm(test_loader, desc='Testing'):
+        input_ids, attention_mask, warm_labels, competence_labels = [b.to(device) for b in batch]
 
-#             warmth_scores.extend(warmth_score.tolist())
+        warm_logits, competence_logits = model(input_ids, attention_mask)
 
-#     return warmth_scores[0]
+        test_warm_accuracy += calculate_accuracy(warm_logits, warm_labels.long())
+        test_competence_accuracy += calculate_accuracy(competence_logits, competence_labels.long())
 
- 
-# pred_text_df = pd.read_excel('D:\WUJia\phd-project\YiXinLi\yixinli_data3\sentence\\predict_warmth_newtext.xlsx')
-# df2 = pd.DataFrame(pred_text_df)
-# print(df2.head())
+# 计算平均准确率
+avg_test_warm_accuracy = test_warm_accuracy / len(test_loader)
+avg_test_competence_accuracy = test_competence_accuracy / len(test_loader)
 
-# warmth_scores = predict(model, df2)
+print(f'Test Warm Accuracy: {avg_test_warm_accuracy:.4f}, Test Competence Accuracy: {avg_test_competence_accuracy:.4f}')
 
-# # 将原始文本和对应的 warmth_scores 存储到新的 DataFrame
-# output_df = pd.DataFrame({'text': df2['sentence'], 'warmth_score': warmth_scores})
-
-# # 将 DataFrame 保存为 CSV 文件
-# output_df.to_csv('predict_text_warmth4.csv', index=False)
-
-
-
-
-
-
+print('Training and evaluation complete.')
